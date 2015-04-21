@@ -10,10 +10,12 @@
 }
 \usage{
 fread(input, sep="auto", sep2="auto", nrows=-1L, header="auto", na.strings="NA",
-stringsAsFactors=FALSE, verbose=FALSE, autostart=30L, skip=-1L, select=NULL,
-drop=NULL, colClasses=NULL,
+stringsAsFactors=FALSE, verbose=getOption("datatable.verbose"), autostart=1L,
+skip=0L, select=NULL, drop=NULL, colClasses=NULL,
 integer64=getOption("datatable.integer64"),         # default: "integer64"
-showProgress=getOption("datatable.showProgress")    # default: TRUE
+dec=if (sep!=".") "." else ",",
+showProgress=getOption("datatable.showProgress"),   # default: TRUE
+data.table=getOption("datatable.fread.datatable")   # default: TRUE
 )
 }
 \arguments{
@@ -31,7 +33,9 @@ showProgress=getOption("datatable.showProgress")    # default: TRUE
   \item{drop}{ Vector of column names or numbers to drop, keep the rest. }
   \item{colClasses}{ A character vector of classes (named or unnamed), as read.csv. Or a named list of vectors of column names or numbers, see examples. colClasses in fread is intended for rare overrides, not for routine use. fread will only promote a column to a higher type if colClasses requests it. It won't downgrade a column to a lower type since NAs would result. You have to coerce such columns afterwards yourself, if you really require data loss. }
   \item{integer64}{ "integer64" (default) reads columns detected as containing integers larger than 2^31 as type \code{bit64::integer64}. Alternatively, \code{"double"|"numeric"} reads as \code{base::read.csv} does; i.e., possibly with loss of precision and if so silently. Or, "character". }
+  \item{dec}{ The decimal separator as in \code{base::read.csv}. If not "." (default) then usually ",". See details. }
   \item{showProgress}{ TRUE displays progress on the console using \code{\\r}. It is produced in fread's C code where the very nice (but R level) txtProgressBar and tkProgressBar are not easily available. }
+  \item{data.table}{ TRUE returns a \code{data.table}. FALSE returns a \code{data.frame}. }
 }
 \details{
 
@@ -49,9 +53,11 @@ All known line endings are detected automatically: \code{\\n} (*NIX including Ma
 
 If an empty line is encountered then reading stops there, with warning if any text exists after the empty line such as a footer. The first line of any text discarded is included in the warning message.
 
+On Windows, \code{fread(...,dec=",")} should just work. \code{fread} uses C function \code{strtod} to read numeric data; e.g., \code{1.23} or \code{1,23}. \code{strtod} retrieves the decimal separator (\code{.} or \code{,} usually) from the locale of the R session rather than as an argument passed to the \code{strtod} function. So for \code{fread(...,dec=",")} to work, \code{fread} changes this (and only this) R session's locale temporarily to a locale which provides the desired decimal separator. On Windows, "French_France.1252" is tried which should be available as standard (any locale with comma decimal separator would suffice) and on unix "fr_FR.utf8" (you may need to install this locale on unix). \code{fread()} is very careful to set the locale back again afterwards, even if the function fails with an error. The choice of locale is determined by \code{options()$datatable.fread.dec.locale}. This may be a \emph{vector} of locale names and if so they will be tried in turn until the desired \code{dec} is obtained; thus allowing more than two different decimal separators to be selected. This is a new feature in v1.9.6 and is experimental. In case of problems, turn it off with \code{options(datatable.fread.dec.experiment=FALSE)}.
+
 }
 \value{
-    A \code{data.table}.
+    A \code{data.table} by default. A \code{data.frame} when \code{data.table=FALSE}; e.g. \code{options(datatable.fread.datatable=FALSE)}.
 }
 \references{
 Background :\cr
@@ -71,8 +77,7 @@ Background :\cr
 
 finagler = "to get or achieve by guile or manipulation" \url{http://dictionary.reference.com/browse/finagler}
 }
-\seealso{ \code{\link[utils]{read.csv}}, \code{\link[base]{url}}
-\if{html}{\out{<script type="text/javascript">var sc_project=6237851;var sc_invisible=1;var sc_security="518c93ca";</script><script type="text/javascript" src="http://www.statcounter.com/counter/counter.js"></script><noscript><div class="statcounter"><a title="web statistics" href="http://statcounter.com/free-web-stats/" target="_blank"><img class="statcounter" src="http://c.statcounter.com/6237851/0/518c93ca/1/" alt="web statistics"></a></div></noscript>}}
+\seealso{ \code{\link[utils]{read.csv}}, \code{\link[base]{url}}, \code{\link[base]{Sys.setlocale}}
 }
 \examples{
 \dontrun{

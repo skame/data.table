@@ -2,17 +2,16 @@
 \alias{setDT}
 \title{Convert lists and data.frames to data.table by reference}
 \description{
-  Note that in \code{data.table} parlance, all \code{set*} functions change their input \emph{by reference}. That is, no copy is made at all, other than temporary working memory, which is as large as one column.. The only other \code{data.table} operator that modifies input by reference is \code{\link{:=}}. Check out the \code{See Also} section below for other \code{set*} function \code{data.table} provides.
+  In \code{data.table} parlance, all \code{set*} functions change their input \emph{by reference}. That is, no copy is made at all, other than temporary working memory, which is as large as one column.. The only other \code{data.table} operator that modifies input by reference is \code{\link{:=}}. Check out the \code{See Also} section below for other \code{set*} function \code{data.table} provides.
 
   \code{setDT} converts lists (both named and unnamed) and data.frames to data.tables \emph{by reference}. This feature was requested on \href{http://stackoverflow.com/questions/20345022/convert-a-data-frame-to-a-data-table-without-copy}{Stackoverflow}.
   
 }
 \usage{
-setDT(x, giveNames=TRUE, keep.rownames=FALSE)
+setDT(x, keep.rownames=FALSE)
 }
 \arguments{
   \item{x}{ A named or unnamed \code{list}, \code{data.frame} or \code{data.table}. }
-  \item{giveNames}{ For list input to \code{setDT}, \code{TRUE} automatically generates missing column names. \code{FALSE} sets all column names to \code{""}. }
   \item{keep.rownames}{ For \code{data.frame}s, \code{TRUE} retains the \code{data.frame}'s row names under a new column \code{rn}. }
 }
 
@@ -21,11 +20,10 @@ setDT(x, giveNames=TRUE, keep.rownames=FALSE)
 }
 
 \value{
-    The input is modified by reference, and returned (invisibly) so it can be used in compound statements; e.g., \code{setDT(X)[, sum(b), by=a]}.
+    The input is modified by reference, and returned (invisibly) so it can be used in compound statements; e.g., \code{setDT(X)[, sum(B), by=A]}. If you require a copy, take a copy first (using \code{DT2 = copy(DT)}). See \code{?copy}.
 }
 
-\seealso{ \code{\link{setkey}}, \code{\link{setattr}}, \code{\link{setnames}}, \code{\link{set}}, \code{\link{:=}}, \code{\link{setorder}}, \code{\link{copy}}, \code{\link{setDF}}
-\if{html}{\out{<script type="text/javascript">var sc_project=6237851;var sc_invisible=1;var sc_security="518c93ca";</script><script type="text/javascript" src="http://www.statcounter.com/counter/counter.js"></script><noscript><div class="statcounter"><a title="web statistics" href="http://statcounter.com/free-web-stats/" target="_blank"><img class="statcounter" src="http://c.statcounter.com/6237851/0/518c93ca/1/" alt="web statistics"></a></div></noscript>}}
+\seealso{ \code{\link{setkey}}, \code{\link{setcolorder}}, \code{\link{setattr}}, \code{\link{setnames}}, \code{\link{set}}, \code{\link{:=}}, \code{\link{setorder}}, \code{\link{copy}}, \code{\link{setDF}}
 }
 \examples{
 
@@ -34,8 +32,9 @@ X = data.frame(A=sample(3, 10, TRUE),
          B=sample(letters[1:3], 10, TRUE), 
          C=sample(10), stringsAsFactors=FALSE)
 
+# Convert X to data.table by reference and 
 # get the frequency of each "A,B" combination
-setDT(X)[, .N, by="A,B"][]
+setDT(X)[, .N, by=.(A,B)]
 
 # convert list to data.table 
 # autofill names

@@ -37,11 +37,25 @@
              "datatable.warnredundantby"="TRUE",                  # not a function argument
              "datatable.alloccol"="quote(max(100L,ncol(DT)+64L))",# argument 'n' of alloc.col. Allocate at least 64 spare slots by default. Needs to be 100L floor to save small object reallocs.
              "datatable.integer64"="'integer64'",    # datatable.<argument name>    integer64|double|character
-             "datatable.showProgress"="1L"           # in fread
+             "datatable.showProgress"="1L",          # in fread
+             "datatable.auto.index"="TRUE",          # DT[col=="val"] to auto add index so 2nd time faster
+             "datatable.fread.datatable"="TRUE",
+             "datatable.old.bywithoutby"="FALSE",    # temp rollback method for code migration, will be removed in future
+             "datatable.fread.dec.experiment"="TRUE", # temp.  will remove once stable
+             "datatable.fread.dec.locale"=if (.Platform$OS.type=="unix") "'fr_FR.utf8'" else "'French_France.1252'"
              )
     for (i in setdiff(names(opts),names(options()))) {
         eval(parse(text=paste("options(",i,"=",opts[i],")",sep="")))
     }
+    # reshape2
+    # Tried this :
+    # if (!"package:reshape2" %in% search()) {
+    #   # temporary until reshape2 pull request to make generic is on CRAN ...
+    #   try(library(reshape2, pos="package:base", quietly=TRUE, warn.conflicts=FALSE), silent=TRUE)
+    # }
+    # which works. But then when melt in data.table is loaded, _that's_ what generates the mask message.
+    # There's also a NOTE: Package startup functions should not change the search path.
+    # Therefore, removed. Users will need to make sure reshape2 isn't loaded, or loaded behind data.table on search()
     
     # Test R behaviour ...
     
@@ -76,7 +90,7 @@
 .R.subassignCopiesOthers = TRUE
 .R.subassignCopiesVecsxp = TRUE
 
-getRversion = function(...) stop("Reminder to data.table developers: don't use getRversion() internally. Add a behaviour test to .onLoad instead.")
+getRversion <- function(...) stop("Reminder to data.table developers: don't use getRversion() internally. Add a behaviour test to .onLoad instead.")
 # 1) using getRversion() wasted time when R3.0.3beta was released without the changes we expected in getRversion()>"3.0.2".
 # 2) R-devel and ourselves may wish to tinker with R-devel, turning on and off features in the same version number. So it's better if data.table doesn't hard code expectations into the version number.
 # 3) The discipline of adding a feaure test here helps fully understand the change.
