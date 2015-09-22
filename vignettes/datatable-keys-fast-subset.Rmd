@@ -7,14 +7,13 @@ output:
     highlight: pygments
     css : css/bootstrap.css
 vignette: >
-  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteIndexEntry{Keys and fast binary search based subset}
   %\VignetteEngine{knitr::rmarkdown}
   \usepackage[utf8]{inputenc}
 ---
 
 ```{r, echo = FALSE, message = FALSE}
 require(data.table)
-require(RCurl)
 knitr::opts_chunk$set(
   comment = "#",
   error = FALSE,
@@ -26,7 +25,7 @@ options(datatable.auto.index=FALSE)
 
 This vignette is aimed at those who are already familiar with *data.table* syntax, its general form, how to subset rows in `i`, select and compute on columns, add/modify/delete columns *by reference* in `j` and  group by using `by`. If you're not familar with these concepts, please read the *"Introduction to data.table"* and *"data.table reference semantics"* vignettes first.
 
----
+***
 
 ## Data {#data}
 
@@ -37,7 +36,7 @@ options(width=100)
 ```
 
 ```{r}
-flights <- fread("https://raw.githubusercontent.com/wiki/arunsrinivasan/flights/NYCflights14/flights14.csv")
+flights <- fread("flights14.csv")
 head(flights)
 dim(flights)
 ```
@@ -46,19 +45,19 @@ dim(flights)
 
 In this vignette, we will
 
-* first introduce the concept of `key` in *data.table*, and set and use keys to perform     subsets in `i`,
+* first introduce the concept of `key` in *data.table*, and set and use keys to perform *fast binary search* based subsets in `i`,
 
 * see that we can combine key based subsets along with `j` and `by` in the exact same way as before,
 
 * look at other additional useful arguments - `mult` and `nomatch`,
 
-* and finally conclude by looking at the advantage of setting keys - *binary search vs vector scans*.
+* and finally conclude by looking at the advantage of setting keys - perform *fast binary search based subsets* and compare with the traditional vector scan approach.
 
 ## 1. Keys
 
 ### a) What is a *key*?
 
-In the *"Introduction to data.table"* vignette, we saw how to subset rows in `i` using logical expressions, row numbers and using `order()`. In this section, we will look at another way of subsetting incredibly fast - using *keys*.
+In the *"Introduction to data.table"* vignette, we saw how to subset rows in `i` using logical expressions, row numbers and using `order()`. In this section, we will look at another way of subsetting incredibly fast - using *keys*. 
 
 But first, let's start by looking at *data.frames*. All *data.frames* have a row names attribute. Consider the *data.frame* `DF` below.
 
@@ -111,7 +110,7 @@ rownames(DT)
 
 Instead, in *data.tables* we set and use `keys`. Think of a `key` as **supercharged rownames**.
 
-#### Keys and their properties {.bs-callout .bs-callout-warning #key-properties}
+#### Keys and their properties {.bs-callout .bs-callout-info #key-properties}
 
 1. We can set keys on *multiple columns* and the column can be of *different types* -- *integer*, *numeric*, *character*, *factor*, *integer64* etc. *list* and *complex* types are not supported yet.
 
@@ -124,6 +123,7 @@ Instead, in *data.tables* we set and use `keys`. Think of a `key` as **superchar
     b. marks those columns as *key* columns by setting an attribute called `sorted` to the *data.table*.
 
     Since the rows are reordered, a *data.table* can have at most one key because it can not be sorted in more than one way.
+
 #
 
 For the rest of the vignette, we will work with `flights` data set.
@@ -137,7 +137,7 @@ setkey(flights, origin)
 head(flights)
 
 ## alternatively we can provide character vectors to the function 'setkeyv()'
-# setkeyv(flights, "origin") # useful for programming
+# setkeyv(flights, "origin") # useful to program with
 ```
 
 #### {.bs-callout .bs-callout-info}
@@ -152,7 +152,7 @@ head(flights)
 
 * You can also set keys directly when creating *data.tables* using the `data.table()` function using `key=` argument. It takes a character vector of column names.
 
-#### set* and `:=`: {.bs-callout .bs-callout-warning}
+#### set* and `:=`: {.bs-callout .bs-callout-info}
 
 In *data.table*, the `:=` operator and all the `set*` (e.g., `setkey`, `setorder`, `setnames` etc..) functions are the only ones which modify the input object *by reference*.
 
@@ -470,7 +470,7 @@ identical(ans1$val, ans2$val)
 
 To understand that, let's first look at what *vector scan approach* (method 1) does.
 
-#### Vector scan approach: {.bs-callout .bs-callout-warning}
+#### Vector scan approach: {.bs-callout .bs-callout-info}
 
 * The column `x` is searched for the value *"g"* row by row, on all 20 million of them. This results in a *logical vector* of size 20 million, with values `TRUE, FALSE or NA` corresponding to `x`'s value.
 
@@ -484,7 +484,7 @@ This is what we call a *vector scan approach*. And this is quite inefficient, es
 
 Now let us look at binary search approach (method 2). Recall from [Properties of key](#key-properties) - *setting keys reorders the data.table by key columns*. Since the data is sorted, we don't have to *scan through the entire length of the column*! We can instead use *binary search* to search a value in `O(log n)` as opposed to `O(n)` in case of *vector scan approach*, where `n` is the number of rows in the *data.table*. 
 
-#### Binary search approach: {.bs-callout .bs-callout-warning}
+#### Binary search approach: {.bs-callout .bs-callout-info}
 
 Here's a very simple illustration. Let's consider the (sorted) numbers shown below:
 
@@ -512,20 +512,23 @@ In addition, since we obtain the matching row indices directly without having to
 
 ## Summary
 
-In this vignette, we have learnt another method to subset rows in `i` by keying a *data.table*. In particular, we have seen how to
+In this vignette, we have learnt another method to subset rows in `i` by keying a *data.table*. Setting keys allows us to perform blazing fast subsets by using *binary search*. In particular, we have seen how to
 
 #### {.bs-callout .bs-callout-info}
 
-* set and use `keys` on a *data.table*. 
+* set key and subset using the key on a *data.table*. 
 
-* subset by obtaining *row indices* in `i` using `keys`.
+* subset using keys which fetches *row indices* in `i`, but much faster.
 
-* combine key based subsets with `j` and `by`.
+* combine key based subsets with `j` and `by`. Note that the `j` and `by` operations are exactly the same as before.
 
-Key based subsets are **incredibly fast**. They are particularly useful when the task involves *repeated subsetting*.
+Key based subsets are **incredibly fast** and are particularly useful when the task involves *repeated subsetting*.
 
 #
-We don't have to set and use keys for aggregation operations in general, unless the data is extremely large or the task requires repeated subsetting where key based subsets will be noticeably performant. In the next vignette *"Joins and rolling joins"*, we will extend to concept of key based subsets to joining a *data.table* with another *data.table* based on `key` columns.
 
----
+We don't have to set and use keys for aggregation operations in general, unless the data is extremely large and/or the task requires repeated subsetting where key based subsets will be noticeably performant. 
+
+However, keying *data.tables* are essential to *join* two *data.tables* which is the subject of discussion in the next vignette *"Joins and rolling joins"*. We will extend the concept of key based subsets to joining two *data.tables* based on `key` columns.
+
+***
 

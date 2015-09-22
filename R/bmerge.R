@@ -62,19 +62,31 @@ bmerge <- function(i, x, leftcols, rightcols, io, xo, roll, rollends, nomatch, v
             # <OUTDATED> NAs can be produced by this level match, in which case the C code (it knows integer value NA)
             # can skip over the lookup. It's therefore important we pass NA rather than 0 to the C code.
         }
-        if (is.integer(x[[rc]]) && (is.double(i[[lc]]) || is.logical(i[[lc]]))) {
+        # Fix for #1108. 
+        # TODO: clean this code up...
+        # NOTE: bit64::is.double(int64) returns FALSE.. but base::is.double returns TRUE
+        is.int64 <- function(x) inherits(x, 'integer64')
+        is.strictlydouble <- function(x) !is.int64(x) && is.double(x)
+        if (is.integer(x[[rc]]) && (base::is.double(i[[lc]]) || is.logical(i[[lc]]))) {
             # TO DO: add warning if reallyreal about loss of precision
             # or could coerce in binary search on the fly, at cost
             if (verbose) cat("Coercing ", typeof(i[[lc]])," column i.'",icnam,"' to integer to match type of x.'",xcnam,"'. Please avoid coercion for efficiency.\n",sep="")
             newval = i[[lc]]
-            mode(newval) = "integer"  # retains column attributes (such as IDateTime class)
-            set(i,j=lc,value=newval)
-        }
-        if (is.double(x[[rc]]) && (is.integer(i[[lc]]) || is.logical(i[[lc]]))) {
+            if (is.int64(newval))
+                newval = as.integer(newval)
+            else mode(newval) = "integer"  # retains column attributes (such as IDateTime class)
+            set(i, j=lc, value=newval)
+        } else if (is.int64(x[[rc]]) && (is.integer(i[[lc]]) || is.logical(i[[lc]]) || is.strictlydouble(i[[lc]]) )) {
+            if (verbose) cat("Coercing ",typeof(i[[lc]])," column i.'",icnam,"' to double to match type of x.'",xcnam,"'. Please avoid coercion for efficiency.\n",sep="")
+            newval = bit64::as.integer64(i[[lc]])
+            set(i, j=lc, value=newval)
+        } else if (is.strictlydouble(x[[rc]]) && (is.integer(i[[lc]]) || is.logical(i[[lc]]) || is.int64(i[[lc]]) )) {
             if (verbose) cat("Coercing ",typeof(i[[lc]])," column i.'",icnam,"' to double to match type of x.'",xcnam,"'. Please avoid coercion for efficiency.\n",sep="")
             newval = i[[lc]]
-            mode(newval) = "double"
-            set(i,j=lc,value=newval)
+            if (is.int64(newval))
+                newval = as.numeric(newval)
+            else mode(newval) = "double"
+            set(i, j=lc, value=newval)
         }
     }
         
@@ -87,11 +99,16 @@ bmerge <- function(i, x, leftcols, rightcols, io, xo, roll, rollends, nomatch, v
     if (verbose) {last.started.at=proc.time()[3];cat("Starting bmerge ...");flush.console()}
     .Call(Cbmerge, i, x, as.integer(leftcols), as.integer(rightcols), io<-haskey(i), xo, roll, rollends, nomatch, f__, len__, allLen1)
     # NB: io<-haskey(i) necessary for test 579 where the := above change the factor to character and remove i's key
-    if (verbose) {cat("done in",round(proc.time()[3]-last.started.at,3),"secs\n");flush.console}
-    
-    for (ii in resetifactor) set(i,j=ii,value=origi[[ii]])  # in the caller's shallow copy,  see comment at the top of this function for usage
+    if (verbose) {cat("done in",round(proc.time()[3]-last.started.at,3),"secs\n");flush.console()}
+
+    # in the caller's shallow copy,  see comment at the top of this function for usage
     # We want to leave the coercions to i in place otherwise, since the caller depends on that to build the result
-    
+    if (length(resetifactor)) {
+        for (ii in resetifactor) 
+            set(i,j=ii,value=origi[[ii]])
+        if (haskey(origi))
+            setattr(i, 'sorted', key(origi))
+    }    
     return(list(starts=f__, lens=len__, allLen1=allLen1))
 }
 

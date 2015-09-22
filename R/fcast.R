@@ -54,7 +54,7 @@ value_vars <- function(value.var, varnames) {
     value.var    
 }
 
-aggregate_funs <- function(funs, vals, ...) {
+aggregate_funs <- function(funs, vals, sep="_", ...) {
     if (is.call(funs) && funs[[1L]] == "eval") 
         funs = eval(funs[[2L]], parent.frame(2L), parent.frame(2L))
     if (is.call(funs) && as.character(funs[[1L]]) %in% c("c", "list")) 
@@ -79,7 +79,8 @@ aggregate_funs <- function(funs, vals, ...) {
                 if (length(dots))
                     expr = c(expr, dots)
                 ans[[k]] = as.call(expr)
-                nms[k] = paste(all.names(i, max.names=1L, functions=TRUE), j, sep="_")
+                # changed order of arguments here, #1153
+                nms[k] = paste(j, all.names(i, max.names=1L, functions=TRUE), sep=sep)
                 k = k+1L;
             }
         }
@@ -89,8 +90,7 @@ aggregate_funs <- function(funs, vals, ...) {
     as.call(c(quote(list), unlist(ans)))
 }
 
-dcast.data.table <- function(data, formula, fun.aggregate = NULL, ..., margins = NULL, 
-    subset = NULL, fill = NULL, drop = TRUE, value.var = guess(data), verbose = getOption("datatable.verbose")) {
+dcast.data.table <- function(data, formula, fun.aggregate = NULL, sep = "_", ..., margins = NULL, subset = NULL, fill = NULL, drop = TRUE, value.var = guess(data), verbose = getOption("datatable.verbose")) {
     if (!is.data.table(data)) stop("'data' must be a data.table.")
     if (anyDuplicated(names(data))) stop('data.table to cast must have unique column names')
     drop = as.logical(drop[1])
@@ -111,7 +111,7 @@ dcast.data.table <- function(data, formula, fun.aggregate = NULL, ..., margins =
     }
     setattr(lvars, 'names', c("lhs", "rhs"))
     # Have to take care of duplicate names, and provide names for expression columns properly.
-    varnames = make.unique(sapply(unlist(lvars), all.vars, max.names=1L), sep="_")
+    varnames = make.unique(sapply(unlist(lvars), all.vars, max.names=1L), sep=sep)
     dupidx = which(valnames %in% varnames)
     if (length(dupidx)) {
         dups = valnames[dupidx]
@@ -143,10 +143,10 @@ dcast.data.table <- function(data, formula, fun.aggregate = NULL, ..., margins =
         }
     }
     if (!is.null(fun.call)) {
-        fun.call = aggregate_funs(fun.call, lvals, ...)
+        fun.call = aggregate_funs(fun.call, lvals, sep, ...)
         errmsg = "Aggregating function(s) should take vector inputs and return a single value (length=1). However, function(s) returns length!=1. This value will have to be used to fill any missing combinations, and therefore must be length=1. Either override by setting the 'fill' argument explicitly or modify your function to handle this case appropriately."
         if (is.null(fill)) {
-            fill.default <- dat[0][, eval(fun.call)]
+            fill.default <- suppressWarnings(dat[0][, eval(fun.call)])
             # tryCatch(fill.default <- dat[0][, eval(fun.call)], error = function(x) stop(errmsg, call.=FALSE))
             if (nrow(fill.default) != 1L) stop(errmsg, call.=FALSE)
         }
@@ -197,9 +197,10 @@ dcast.data.table <- function(data, formula, fun.aggregate = NULL, ..., margins =
         maplen = sapply(mapunique, length)
         idx = do.call("CJ", mapunique)[map, I := .I][["I"]] # TO DO: move this to C and avoid materialising the Cross Join.
         ans = .Call("Cfcast", lhs, val, maplen[[1L]], maplen[[2L]], idx, fill, fill.default, is.null(fun.call))
-        allcols = do.call("paste", c(rhs, sep="_"))
+        allcols = do.call("paste", c(rhs, sep=sep))
         if (length(valnames) > 1L)
-            allcols = do.call("paste", c(setcolorder(CJ(valnames, allcols, sorted=FALSE), 2:1), sep="_"))
+            allcols = do.call("paste", c(CJ(valnames, allcols, sorted=FALSE), sep=sep))
+            # removed 'setcolorder()' here, #1153
         setattr(ans, 'names', c(lhsnames, allcols))
         setDT(ans); setattr(ans, 'sorted', lhsnames)
     } else {

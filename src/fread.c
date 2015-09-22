@@ -14,6 +14,7 @@
 #include <fcntl.h>   // for open()
 #include <unistd.h>  // for close()
 #endif
+#include <signal.h> // the debugging machinery + breakpoint aidee
 
 /*****    TO DO    *****
 Restore test 1339 (balanced embedded quotes, see ?fread already updated).
@@ -65,11 +66,14 @@ static clock_t tCoerce, tCoerceAlloc;
 static const char TypeName[6][10] = {"LGL","INT","INT64","REAL","STR","NULL"};  // for messages and errors
 static int TypeSxp[6] = {LGLSXP,INTSXP,REALSXP,REALSXP,STRSXP,NILSXP};
 static union {double d; long long l; int b;} u;   // b=boolean, can hold NA_LOGICAL
-static const char *fieldStart;
+static const char *fieldStart, *fieldEnd;
 static int fieldLen;
 #define NUT        8   // Number of User Types (just for colClasses where "numeric"/"double" are equivalent)
 static const char UserTypeName[NUT][10] = {"logical", "integer", "integer64", "numeric", "character", "NULL", "double", "CLASS" };  // important that first 6 correspond to TypeName.  "CLASS" is the fall back to character then as.class at R level ("CLASS" string is just a placeholder).
 static int UserTypeNameMap[NUT] = { SXP_LGL, SXP_INT, SXP_INT64, SXP_REAL, SXP_STR, SXP_NULL, SXP_REAL, SXP_STR };
+// quote
+const char *quote;
+static int quoteStatus, stripWhite;
 
 const char *fnam=NULL, *mmp;
 size_t filesize;
@@ -102,10 +106,112 @@ void STOP(const char *format, ...) {
     closeFile();  // some errors point to data in the file, hence via msg buffer first
     error(msg);
 }
+// ********************************************************************************************
+// NA handling.
+// algorithm is following
+// 1) Strto*() checks whether we can convert substring into given * type
+// 2) If not, we try to iteratively char-by-char starting from begining of the substring 
+// look forward for maximum max(nchar(nastrings)) symbols:
+// ********************************************************************************************
+// max_na_nchar = max(nchar(nastrings))
+// lch = pointer to begining of substring we want to check
+// for (i in 0:max_na_nchar) {
+//   ch = lch[i]
+//   if( any of nastrings contain ch at position i)
+//      continue
+//   else return FALSE
+// }
+// return TRUE
+// ********************************************************************************************
+// for checking "if" condition we manage mask "na_mask" with length na_len = length(nastrings). 
+// 1 on mask position i means that nastring[i] is still candidate for given substring.
+// 0 means this substring can't be casted into nastring[i], so nastring[i] is not candidate.
+int *NA_MASK;
+// means nastrings == 0; will do nothing with nastrings
+int FLAG_NA_STRINGS_NULL;
+const char **NA_STRINGS;
+int NA_MAX_NCHAR;
+int NASTRINGS_LEN;
+int *EACH_NA_STRING_LEN;
+// calculates maximum string length for a given R character vector
+int get_maxlen(SEXP char_vec) {
+  int maxlen = -1;
+  int cur_len;
+  for (int i=0; i< LENGTH(char_vec); i++) {
+    cur_len = strlen(CHAR(STRING_ELT(char_vec, i)));
+    maxlen = (cur_len > maxlen) ? cur_len : maxlen;
+  }
+  return maxlen;
+}
+// initialize mask. At the begining we assume any nastring can be candidate.
+static inline void init_mask() {
+  for(int i = 0; i < NASTRINGS_LEN; i++)
+    NA_MASK[i] = 1;
+}
+static inline int can_cast_to_na(const char* lch) {
+  const char *lch2 = lch;
+  // nastrings==NULL => do nothing
+  // TODO: move this out of this function and into strto* functions directly?
+  if(FLAG_NA_STRINGS_NULL) {
+    return 0;
+  }
+  init_mask();
+  // check whether mask contains any candidates which still potentially can be casted to NA
+  int non_zero_left = NASTRINGS_LEN;
+  //case when lch is empty string!
+  int na_found_flag = 1;
+  int pos = 0;
+  int j;
+  const char *nastring_iter;
+  // look for possible NA strings:
+  // max forward symbols = max length of the nastring template
+  while (pos < NA_MAX_NCHAR && lch2 != eof && *lch2 != sep && *lch2 != eol) {
+    j = 0;
+    na_found_flag = 0;
+    // check whether any of the nastrings template contains current (i-th forward) symbol at i-th forward positions
+    // iterate through nastrings
+    while( j < NASTRINGS_LEN && non_zero_left > 0 ) {
+      // not marked before
+      if( NA_MASK[j] != 0) {
+        nastring_iter = NA_STRINGS[j];
+        // nastring[j] candidate founded
+        if(EACH_NA_STRING_LEN[j] == pos + 1 && nastring_iter[pos] == *lch2) {
+          na_found_flag = 1;
+        }
+        // nastring[j] candidate has smaller length than we are looking
+        // or doesn't contain necessary symbol at position we are cheking
+        if(EACH_NA_STRING_LEN[j] < pos + 1 || nastring_iter[pos] != *lch2) {
+          NA_MASK[j] = 0;
+          non_zero_left--;
+        }
+      }
+      j++;
+    }
+    //all elements of mask == 0 means we can't convert tested substring to NA
+    if(non_zero_left == 0) {
+      return 0;
+    }
+    pos++;
+    lch2++;
+  }
+  // found delimiter after right NA candidate or empty string
+  if(na_found_flag && (lch2 == eof || *lch2 == sep || *lch2 == eol)) {
+    ch = lch2;
+    return 1;
+  }
+  else return 0;
+}
+// ********************************************************************************************
 
-static inline void Field(int err)
+static inline void skip_spaces() {
+    while(ch<eof && *ch==' ') ch++;
+}
+
+static inline void Field()
 {
+    quoteStatus=0;
     if (*ch=='\"') { // protected, now look for the next ", so long as it doesn't leave unbalanced unquoted regions
+        quoteStatus=1;
         fieldStart = ch+1;
         int eolCount=0;  // just >0 is used currently but may as well count
         Rboolean noEmbeddedEOL=FALSE, quoteProblem=FALSE;
@@ -115,7 +221,6 @@ static inline void Field(int err)
                 eolCount+=(*ch==eol);
                 continue;  // fast return in most cases of characters
             }
-            
             if (ch+1==eof || *(ch+1)==sep || *(ch+1)==eol) break;
             // " followed by sep|eol|eof dominates a field ending with \" (for support of Windows style paths)
             
@@ -129,26 +234,33 @@ static inline void Field(int err)
             }
         }
         if (quoteProblem || ch==eof) {
-            if (!err) {
-                fieldLen = -1; // so that countfields/separator testing knows line is invalid
-                return;
-            }
-            STOP("Field %d on line %d starts with quote (\") but then has a problem. It can contain balanced unescaped quoted subregions but if it does it can't contain embedded \\n as well. Check for unbalanced unescaped quotes: %.*s", field+1, line, ch-fieldStart+1, fieldStart-1);
-        }
-        fieldLen = (int)(ch-fieldStart);
-        ch++; // from closing quote to rest on sep|eol|eof
-    } else {           // unprotected, look for next next [sep|eol]
-        if (sep==' ') {
-            while(ch<eof && *ch==sep) ch++;
-            fieldStart = ch;
-            while(ch<eof && *ch!=sep && *ch!=eol) ch++;
-            fieldLen = (int)(ch-fieldStart);
-            while(ch<eof && *ch==sep) ch++;
-            if (ch<eof && *ch!=eol) ch--;  // leave on last space before new field's text
+            // "..." logic has failed. Delegate to normal routine instead of erroring. Solves many cases, especially when files have both proper balanced, and imbalanced quotes. I think this is more towards fread's philosophy than having an explicit 'quote' argument..
+            quoteStatus=0;
+            ch = fieldStart-1;
         } else {
+            fieldLen = (int)(ch-fieldStart);
+            ch++; // from closing quote to rest on sep|eol|eof
+        }
+    }
+    if (!quoteStatus) {
+        // either "" logic failed and we're here, or we're directly here.
+        // unprotected, look for next next [sep|eol]
+        if (sep==' ') {
             fieldStart = ch;
             while(ch<eof && *ch!=sep && *ch!=eol) ch++;
             fieldLen = (int)(ch-fieldStart);
+            if (stripWhite) {
+                skip_spaces();
+                if (ch<eof && *ch!=eol) ch--;  // leave on last space before new field's text
+            }
+        } else {
+            fieldStart=ch;
+            while(ch<eof && *ch!=sep && *ch!=eol) ch++;
+            if (stripWhite) {
+                fieldEnd=ch-1;
+                while(fieldEnd>=fieldStart && *fieldEnd==' ') fieldEnd--;
+                fieldLen = (int)(fieldEnd-fieldStart)+1;
+            } else fieldLen = (int)(ch-fieldStart);
         }
     }
     // Rprintf("Processed field %.*s\n", (int)(ch-fieldStart), fieldStart);
@@ -161,12 +273,8 @@ static int countfields()
     if (*ch==eol) { ch+=eolLen; return 0; }
     while (1) {
         ncol++;
-        Field(0);
-        if (fieldLen==-1) {
-            while(ch<eof && *ch!=eol) ch++;  // advance to end of line (or next embedded \n - which we now don't know if really embedded)
-            if (ch<eof) ch+=eolLen;          // move ch to the start of the next line
-            return -1;                       // see test 1010
-        }  
+        skip_spaces();
+        Field();
         if (ch==eof || *ch==eol) {
             if (ch<eof) ch+=eolLen;          // move ch to the start of the next line
             return ncol;
@@ -190,8 +298,12 @@ static inline Rboolean Strtoll()
     if (lch==eof || *lch==sep || *lch==eol) {   //  ',,' or ',   ,' or '\t\t' or '\t   \t' etc => NA
         ch = lch;                               // advance global ch over empty field
         return(TRUE);                           // caller already set u.l=NA_INTEGR or u.d=NA_REAL as appropriate
-    }  
-    const char *start = lch;                          // start of [+-][0-9]+
+    }
+    // moved this if-statement to the top for #1314
+    if(can_cast_to_na(lch)) { 
+        // ch pointer already set to end of nastring by can_cast_to_na() function
+        return(TRUE);
+    }
     if (*lch=='-') { sign=0; lch++; if (*lch<'0' || *lch>'9') return(FALSE); }   // + or - symbols alone should be character
     else if (*lch=='+') { sign=1; lch++; if (*lch<'0' || *lch>'9') return(FALSE); }
     long long acc = 0;
@@ -199,17 +311,16 @@ static inline Rboolean Strtoll()
         acc *= 10;            // overflow avoided, thanks to BDR and CRAN's new ASAN checks, 25 Feb 2014
         acc += *lch-'0';      // have assumed compiler will optimize the constant expression (LLONG_MAX-10)/10
         lch++;                // TO DO can remove lch<eof when last row is specialized in case of no final eol
+        
     }
-    int len = lch-start;
+    // take care of leading spaces
+    while(lch<eof && *lch!=sep && *lch==' ') lch++;
+    //int len = lch-start;
     //Rprintf("Strtoll field '%.*s' has len %d\n", lch-ch+1, ch, len);
     if (lch==eof || *lch==sep || *lch==eol) {   // only if field fully consumed (e.g. not ,123456A,)
         ch = lch;
         u.l = sign ? acc : -acc;
         return(TRUE);     // either int or int64 read ok, result in u.l.  INT_MIN and INT_MAX checked by caller, as appropriate
-    }
-    if (len==0 && lch<eof-1 && *lch++=='N' && *lch++=='A' && (lch==eof || *lch==sep || *lch==eol)) {   // ',NA,'
-        ch = lch;       // advance over NA
-        return(TRUE);   // NA_INTEGER or NA_REAL (for SXP_INT64) was already set by caller
     }
     return(FALSE);  // invalid integer such as "3.14", "123ABC," or "12345678901234567890" (larger than even int64) => bump type.
 }
@@ -226,9 +337,18 @@ static inline Rboolean Strtod()
     const char *lch=ch;
     while (lch<eof && isspace(*lch) && *lch!=sep && *lch!=eol) lch++;
     if (lch==eof || *lch==sep || *lch==eol) {u.d=NA_REAL; ch=lch; return(TRUE); }  // e.g. ',,' or '\t\t'
+    // moved this if-loop to top for #1314
+    if(can_cast_to_na(lch)) {
+      u.d = NA_REAL;
+      // ch pointer already set to end of nastring by can_cast_to_na() function
+      return(TRUE);
+    }
     const char *start=lch;
     errno = 0;
+
     u.d = strtod(start, (char **)&lch);
+    // take care of leading spaces
+    while(lch<eof && *lch!=sep && *lch==' ') lch++;
     if (errno==0 && lch>start && (lch==eof || *lch==sep || *lch==eol)) {
         ch = lch;
         return(TRUE);  // double read ok (result in u.d). Done. Most common case.
@@ -249,11 +369,6 @@ static inline Rboolean Strtod()
             return(TRUE);
         }
     }
-    if (lch==start && lch<eof-1 && *lch++=='N' && *lch++=='A' && (lch==eof || *lch==sep || *lch==eol)) {
-        ch = lch;
-        u.d = NA_REAL;
-        return(TRUE);
-    }
     return(FALSE);     // invalid double, need to bump type.
 }
 
@@ -261,7 +376,12 @@ static inline Rboolean Strtob()
 {
     // String (T,F,True,False,TRUE or FALSE) to boolean.  These usually come from R when it writes out.
     const char *start=ch;
-    if (*ch=='T') {
+    // moved this if-statement to top for #1314
+    if(can_cast_to_na(ch)) {
+      u.b = NA_LOGICAL;
+      // ch pointer already set to end of nastring by can_cast_to_na() function
+      return(TRUE);
+    } else if (*ch=='T') {
         u.b = TRUE;
         if (++ch==eof || *ch==sep || *ch==eol) return(TRUE);
         if (*ch=='R' && *++ch=='U' && *++ch=='E' && (++ch==eof || *ch==sep || *ch==eol)) return(TRUE);
@@ -274,11 +394,6 @@ static inline Rboolean Strtob()
         if (*ch=='A' && *++ch=='L' && *++ch=='S' && *++ch=='E' && (++ch==eof || *ch==sep || *ch==eol)) return(TRUE);
         ch = start+1;
         if (*ch=='a' && *++ch=='l' && *++ch=='s' && *++ch=='e' && (++ch==eof || *ch==sep || *ch==eol)) return(TRUE);
-    }
-    else if (ch==eof || *ch==sep || *ch==eol ||
-             (ch<eof-1 && *ch=='N' && *++ch=='A' && (++ch==eof || *ch==sep || *ch==eol))) {
-        u.b = NA_LOGICAL;
-        return(TRUE);
     }
     ch = start;
     return(FALSE);     // invalid boolean, need to bump type.
@@ -413,7 +528,7 @@ static SEXP coerceVectorSoFar(SEXP v, int oldtype, int newtype, R_len_t sofar, R
     return(newv);
 }
 
-SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastrings, SEXP verbosearg, SEXP autostart, SEXP skip, SEXP select, SEXP drop, SEXP colClasses, SEXP integer64, SEXP dec, SEXP showProgressArg)
+SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastrings, SEXP verbosearg, SEXP autostart, SEXP skip, SEXP select, SEXP drop, SEXP colClasses, SEXP integer64, SEXP dec, SEXP encoding, SEXP stripWhiteArg, SEXP showProgressArg)
 // can't be named fread here because that's already a C function (from which the R level fread function took its name)
 {
     SEXP thiscol, ans, thisstr;
@@ -424,9 +539,24 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
     verbose=LOGICAL(verbosearg)[0];
     clock_t t0 = clock();
     ERANGEwarning = FALSE;  // just while detecting types, then TRUE before the read data loop
-    if (!isInteger(showProgressArg) || LENGTH(showProgressArg)!=1 || (INTEGER(showProgressArg)[0]!=0 && INTEGER(showProgressArg)[0]!=1))
-        error("showProgress must be 0 or 1, currently");
+
+    // Encoding, #563: Borrowed from do_setencoding from base R
+    // https://github.com/wch/r-source/blob/ca5348f0b5e3f3c2b24851d7aff02de5217465eb/src/main/util.c#L1115
+    // Check for mkCharLenCE function to locate as to where where this is implemented.
+    cetype_t ienc;
+    if (!strcmp(CHAR(STRING_ELT(encoding, 0)), "Latin-1")) ienc = CE_LATIN1;
+    else if (!strcmp(CHAR(STRING_ELT(encoding, 0)), "UTF-8")) ienc = CE_UTF8;
+    else ienc = CE_NATIVE;
+
+    stripWhite = LOGICAL(stripWhiteArg)[0];
+
+    // Extra tracing for apparent 32bit Windows problem: https://github.com/Rdatatable/data.table/issues/1111
+    if (!isInteger(showProgressArg)) error("showProgress is not type integer but type '%s'. Please report.", type2char(TYPEOF(showProgressArg)));
+    if (LENGTH(showProgressArg)!=1) error("showProgress is not length 1 but length %d. Please report.", LENGTH(showProgressArg));
     int showProgress = INTEGER(showProgressArg)[0];
+    if (showProgress!=0 && showProgress!=1)
+        error("showProgress is not 0 or 1 but %d. Please report.", showProgress);    
+    
     if (!isString(dec) || LENGTH(dec)!=1 || strlen(CHAR(STRING_ELT(dec,0))) != 1)
         error("dec must be a single character");
     const char decChar = *CHAR(STRING_ELT(dec,0));
@@ -437,13 +567,14 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
     if (sizeof(double) != 8) error("Internal error: sizeof(double) is %d bytes, not 8.", sizeof(double));
     if (sizeof(long long) != 8) error("Internal error: sizeof(long long) is %d bytes, not 8.", sizeof(long long));
     
+    // raise(SIGINT);
     // ********************************************************************************************
     //   Check inputs.
     // ********************************************************************************************
     
     if (!isLogical(headerarg) || LENGTH(headerarg)!=1) error("'header' must be 'auto', TRUE or FALSE"); // 'auto' was converted to NA at R level
     header = LOGICAL(headerarg)[0];
-    if (!isNull(nastrings) && !isString(nastrings)) error("'na.strings' is type '",type2char(TYPEOF(nastrings)),"'. Must be a character vector.");
+    if (!isNull(nastrings) && !isString(nastrings)) error("'na.strings' is type '%s'.  Must be a character vector.", type2char(TYPEOF(nastrings)));
     if (!isInteger(nrowsarg) || LENGTH(nrowsarg)!=1 || INTEGER(nrowsarg)[0]==NA_INTEGER) error("'nrows' must be a single non-NA number of type numeric or integer");
     if (!isInteger(autostart) || LENGTH(autostart)!=1 || INTEGER(autostart)[0]<0) error("'autostart' must be a length 1 vector of type numeric or integer and >=0");  // NA_INTEGER is covered by <1
     if (isNumeric(skip)) { skip = PROTECT(coerceVector(skip, INTSXP)); protecti++; }
@@ -451,8 +582,8 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
          ||(isString(skip) && LENGTH(skip)==1))) error("'skip' must be a length 1 vector of type numeric or integer >=0, or single character search string");
     if (!isNull(separg)) {
         if (!isString(separg) || LENGTH(separg)!=1 || strlen(CHAR(STRING_ELT(separg,0)))!=1) error("'sep' must be 'auto' or a single character");
-        if (*CHAR(STRING_ELT(separg,0))=='\"') error("sep='\"' is not an allowed separator");
-        if (*CHAR(STRING_ELT(separg,0)) == decChar) error("The two arguments to fread 'dec' and 'sep' are equal ('%c')", decChar);
+        if (*CHAR(STRING_ELT(separg,0))=='\"') error("sep = '%c' = quote, is not an allowed separator.",'\"');
+        if (*CHAR(STRING_ELT(separg,0)) == decChar) error("The two arguments to fread 'dec' and 'sep' are equal ('%c').", decChar);
     }
     if (!isString(integer64) || LENGTH(integer64)!=1) error("'integer64' must be a single character string");
     if (strcmp(CHAR(STRING_ELT(integer64,0)), "integer64")!=0 &&
@@ -461,7 +592,23 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
         strcmp(CHAR(STRING_ELT(integer64,0)), "character")!=0)
         error("integer64='%s' which isn't 'integer64'|'double'|'numeric'|'character'", CHAR(STRING_ELT(integer64,0)));
     if (!isNull(select) && !isNull(drop)) error("Supply either 'select' or 'drop' but not both");
-
+    // ********************************************************************************************
+    //   NA handling preparations
+    // ********************************************************************************************
+    if( ! isNull(nastrings)) {
+      FLAG_NA_STRINGS_NULL = 0;
+      NASTRINGS_LEN = LENGTH(nastrings);
+      NA_MASK = (int *)malloc(NASTRINGS_LEN * sizeof(int));
+      NA_MAX_NCHAR = get_maxlen(nastrings);
+      NA_STRINGS = malloc(NASTRINGS_LEN * sizeof(char *));
+      EACH_NA_STRING_LEN = malloc(NASTRINGS_LEN * sizeof(int));
+      for (int i = 0; i < NASTRINGS_LEN; i++) {
+        NA_STRINGS[i] = CHAR(STRING_ELT(nastrings, i));
+        EACH_NA_STRING_LEN[i] = strlen(CHAR(STRING_ELT(nastrings, i)));
+      }
+    } else {
+      FLAG_NA_STRINGS_NULL = 1;
+    }
     // ********************************************************************************************
     //   Point to text input, or open and mmap file
     // ********************************************************************************************
@@ -523,7 +670,7 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
             CloseHandle(hFile);
 #endif
             if (sizeof(char *)==4)
-                error("Opened file ok, obtained its size on disk (%.1fMB), but couldn't memory map it. This is a 32bit machine. You don't need more RAM per se but this fread function is tuned for 64bit addressability, at the expense of large file support on 32bit machines. You probably need more RAM to store the resulting data.table, anyway. And most speed benefits of data.table are on 64bit with large RAM, too. Please either upgrade to 64bit (e.g. a 64bit netbook with 4GB RAM can cost just £300), or make a case for 32bit large file support to datatable-help.", filesize/(1024.0*1024));
+                error("Opened file ok, obtained its size on disk (%.1fMB) but couldn't memory map it. This is a 32bit machine. You don't need more RAM per se but this fread function is tuned for 64bit addressability at the expense of large file support on 32bit machines. You probably need more RAM to store the resulting data.table, anyway. And most speed benefits of data.table are on 64bit with large RAM, too. Please upgrade to 64bit.", filesize/(1024.0*1024));
                 // if we support this on 32bit, we may need to use stat64 instead, as R does
             else if (sizeof(char *)==8)
                 error("Opened file ok, obtained its size on disk (%.1fMB), but couldn't memory map it. This is a 64bit machine so this is surprising. Please report to datatable-help.", filesize/1024^2);
@@ -706,13 +853,15 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
     }
     if (ch>mmp) {
         if (*(ch-1)!=eol2) STOP("Internal error. No eol2 immediately before line %d after sep detection.", line);
-        // warn if previous line is not blank, unless skip was provided ...
-        if (isInteger(skip) && INTEGER(skip)[0]==0) {
-            ch2 = ch-eolLen-1;
-            i = 0;
-            while (ch2>=mmp && *ch2!=eol2) { i+=!isspace(*ch2); ch2--; }
-            ch2++;
-            if (i>0) warning("Starting data input on line %d and discarded previous non-empty line: %.*s", line, ch-ch2-eolLen, ch2);
+        ch2 = ch-eolLen-1;
+        i = 0;
+        while (ch2>=mmp && *ch2!=eol2) { i+=!isspace(*ch2); ch2--; }
+        ch2++;
+        if (i>0) {
+            if (line==2 && isInteger(skip) && INTEGER(skip)[0]==0)  // warn about line 1, unless skip was provided
+                warning("Starting data input on line 2 and discarding line 1 because it has too few or too many items to be column names or data: %.*s", ch-ch2-eolLen, ch2);
+            else if (verbose) 
+                Rprintf("The line before starting line %d is non-empty and will be ignored (it has too few or too many items to be column names or data): %.*s", line, ch-ch2-eolLen, ch2);
         }
     }
     if (ch!=pos) STOP("Internal error. ch!=pos after sep detection");
@@ -724,20 +873,23 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
     protecti++;
     allchar=TRUE;
     for (i=0; i<ncol; i++) {
+        skip_spaces(); // remove trailing spaces
         if (ch<eof && *ch=='\"') {
             while(++ch<eof && (*ch!='\"' || (ch+1<eof && *(ch+1)!=sep && *(ch+1)!=eol))) {};
             if (ch<eof && *ch++!='\"') STOP("Internal error: quoted field ends before EOF but not with \"sep");
         } else {                              // if field reads as double ok then it's INT/INT64/REAL; i.e., not character (and so not a column name)
             if (*ch!=sep && *ch!=eol && Strtod())  // blank column names (,,) considered character and will get default names
                 allchar=FALSE;                     // considered testing at least one isalpha, but we want 1E9 to be a value not a column name
-            else while(ch<eof && *ch!=eol && *ch!=sep) ch++;  // skip over unquoted character field
+            else 
+                while(ch<eof && *ch!=eol && *ch!=sep) ch++;  // skip over unquoted character field
         }
         if (i<ncol-1) {   // not the last column (doesn't have a separator after it)
             if (ch<eof && *ch!=sep) STOP("Unexpected character ending field %d of line %d: %.*s", i+1, line, ch-pos+5, pos);
             else if (ch<eof) ch++;
         } 
     }
-    // *** TO DO discard any whitespace after last column name on first row before the eol ***
+    // discard any whitespace after last column name on first row before the eol (was a TODO)
+    skip_spaces();
     if (ch<eof && *ch!=eol) STOP("Not positioned correctly after testing format of header row. ch='%c'",*ch);
     if (verbose && header!=NA_LOGICAL) Rprintf("'header' changed by user from 'auto' to %s\n", header?"TRUE":"FALSE");
     char buff[10]; // to construct default column names
@@ -753,18 +905,18 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
         ch = pos;
         line++;
         for (i=0; i<ncol; i++) {
-            if (ch<eof && *ch=='\"') {ch++; ch2=ch; while(ch2<eof && (*ch2!='\"' || (ch2+1<eof && *(ch2+1)!=sep && *(ch2+1)!=eol))) ch2++;}
-            else {ch2=ch; while(ch2<eof && *ch2!=sep && *ch2!=eol) ch2++;}
-            if (ch2>ch) {
-                SET_STRING_ELT(names, i, mkCharLen(ch, (int)(ch2-ch)));
+            // Skip trailing spaces and call 'Field()' here as it's already designed to handle quote vs non-quote cases.
+            // Also Fiedl() it takes care of leading spaces. Easier to understand the logic.
+            skip_spaces(); Field();
+            if (fieldLen) {
+                SET_STRING_ELT(names, i, mkCharLen(fieldStart, fieldLen));
             } else {
                 sprintf(buff,"V%d",i+1);
                 SET_STRING_ELT(names, i, mkChar(buff));
             }
-            if (ch2<eof && *ch2=='\"') ch2++;
-            if (i<ncol-1) ch=++ch2;
+            if (i<ncol-1) ch++; // move the beginning char of next field
         }
-        while (ch<eof && *ch!=eol) ch++;
+        while (ch<eof && *ch!=eol) ch++; // no need for skip_spaces() here
         if (ch<eof && *ch==eol) ch+=eolLen;  // now on first data row (row after column names)
         pos = ch;
     }
@@ -837,6 +989,7 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
                 if (ch<eof) ch+=eolLen;
                 thispos = ch;
                 i = 0;
+                // countfields() takes care of 'skip_spaces()'
                 while (ch<eof && i<5 && countfields()==ncol) i++;
                 if (i==5) {
                     ch=thispos;
@@ -844,7 +997,8 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
                 }
             }
             if (i<5) {
-                warning("Unable to find 5 lines with expected number of columns (%s)\n", str);
+                if (INTEGER(nrowsarg)[0]==-1)
+                    warning("Unable to find 5 lines with expected number of columns (%s)\n", str);
                 continue;
             }
         }
@@ -853,6 +1007,7 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
             i++;
             lineStart = ch;
             for (field=0;field<ncol;field++) {
+                if (stripWhite) skip_spaces();
                 // Rprintf("Field %d: '%.20s'\n", field+1, ch);
                 fieldLen=0;
                 switch (type[field]) {
@@ -871,9 +1026,8 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
                     if (Strtod()) break;
                     type[field]++;
                 case SXP_STR:
-                    Field(0);   // don't do err=1 here because we don't know 'line' when j=1|2. Leave error to throw in data read step.
+                    Field();   // don't do err=1 here because we don't know 'line' when j=1|2. Leave error to throw in data read step.
                 }
-                if (fieldLen==-1) { i=5; break; } // stop this j early
                 if (ch<eof && *ch==sep && field<ncol-1) {ch++; continue;}  // done, next field
                 if (field<ncol-1) {
                     if (*ch>31) STOP("Expected sep ('%c') but '%c' ends field %d when detecting types (%s): %.*s", sep, *ch, field, str, ch-lineStart+1, lineStart);
@@ -1049,6 +1203,7 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
             }
             for (j=0,resj=0; j<ncol; resj+=(type[j]!=SXP_NULL),j++) {
                 //Rprintf("Field %d: '%.10s' as type %d\n", j+1, ch, type[j]);
+                if (stripWhite) skip_spaces();
                 thiscol = VECTOR_ELT(ans, resj);
                 switch (type[j]) {
                 case SXP_LGL:
@@ -1077,8 +1232,8 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
                     if (Strtod()) { REAL(thiscol)[i] = u.d; break; }
                     SET_VECTOR_ELT(ans, resj, thiscol = coerceVectorSoFar(thiscol, type[j]++, SXP_STR, i, j));
                 case SXP_STR: case SXP_NULL: case_SXP_STR:
-                    Field(1);
-                    if (type[j]==SXP_STR) SET_STRING_ELT(thiscol, i, mkCharLen(fieldStart, fieldLen));
+                    Field();
+                    if (type[j]==SXP_STR) SET_STRING_ELT(thiscol, i, mkCharLenCE(fieldStart, fieldLen, ienc));
                 }
                 if (ch<eof && *ch==sep && j<ncol-1) {ch++; continue;}  // done, next field
                 if (j<ncol-1) {
@@ -1087,9 +1242,14 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
                     // print whole line here because it's often something earlier in the line that messed up
                 }
             }
+            if (stripWhite) skip_spaces();
             //Rprintf("At end of line with i=%d and ch='%.10s'\n", i, ch);
-            while (ch<eof && *ch!=eol) ch++; // discard after end of line, but before \n. TO DO: warn about uncommented text here
-            if (ch<eof && *ch==eol) ch+=eolLen;
+            if (ch<eof && *ch!=eol) {
+                // TODO: skip spaces here if strip.white=TRUE (arg to be added) and then check+warn
+                // TODO: warn about uncommented text here
+                error("Expecting %d cols, but line %d contains text after processing all cols. It is very likely that this is due to one or more fields having embedded sep='%c' and/or (unescaped) '\\n' characters within unbalanced unescaped quotes. fread cannot handle such ambiguous cases and those lines may not have been read in as expected. Please read the section on quotes in ?fread.", ncol, line, sep);
+            }
+            ch+=eolLen; // now that we error here, the if-statement isn't needed -> // if (ch<eof && *ch==eol) ch+=eolLen;
             pos = ch;  // start of line position only needed to include the whole line in any error message
             line++;
         }
@@ -1107,7 +1267,7 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
     if (ch<eof) {
         ch2 = ch;
         while (ch2<eof && *ch2!=eol) ch2++;
-        warning("Stopped reading at empty line %d but text exists afterwards (discarded): %.*s", line, ch2-ch, ch);
+        if (INTEGER(nrowsarg)[0] == -1 || i < nrow) warning("Stopped reading at empty line %d but text exists afterwards (discarded): %.*s", line, ch2-ch, ch);
     }
     if (i<nrow) {
         if (nrow-i > 100 && (double)i/nrow < 0.95)
@@ -1120,9 +1280,14 @@ SEXP readfile(SEXP input, SEXP separg, SEXP nrowsarg, SEXP headerarg, SEXP nastr
         if (verbose) Rprintf("Read %d rows. Exactly what was estimated and allocated up front\n", i);
     }
     for (j=0; j<ncol-numNULL; j++) SETLENGTH(VECTOR_ELT(ans,j), nrow);
-    
+    // release memory from NA handling operations
+    if(!FLAG_NA_STRINGS_NULL) {
+      free(NA_MASK);
+      free(NA_STRINGS);
+      free(EACH_NA_STRING_LEN);
+    }
     // ********************************************************************************************
-    //   Convert na.strings to NA
+    //   Convert na.strings to NA for character columns
     // ********************************************************************************************
     for (k=0; k<length(nastrings); k++) {
         thisstr = STRING_ELT(nastrings,k);

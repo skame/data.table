@@ -31,8 +31,8 @@ data.table(..., keep.rownames=FALSE, check.names=FALSE, key=NULL)
   .SDcols,
   verbose = getOption("datatable.verbose"),                   # default: FALSE
   allow.cartesian = getOption("datatable.allow.cartesian"),   # default: FALSE
-  drop = NULL,
-  rolltolast = FALSE   # deprecated
+  drop = NULL, 
+  on = NULL # join without setting keys, new feature from v1.9.6+
   )
 }
 \arguments{
@@ -51,7 +51,7 @@ data.table(..., keep.rownames=FALSE, check.names=FALSE, key=NULL)
   \item{x}{ A \code{data.table}.
 
 }
-  \item{i}{ Integer, logical or character vector, expression of column names, \code{list} or \code{data.table}.
+  \item{i}{ Integer, logical or character vector, single column numeric \code{matrix}, expression of column names, \code{list} or \code{data.table}.
 
   integer and logical vectors work the same way they do in \code{\link{[.data.frame}}. Other than \code{NA}s in logical \code{i} are treated as \code{FALSE} and a single \code{NA} logical is not recycled to match the number of rows, as it is in \code{[.data.frame}.
 
@@ -128,14 +128,12 @@ data.table(..., keep.rownames=FALSE, check.names=FALSE, key=NULL)
   \item{verbose}{ \code{TRUE} turns on status and information messages to the console. Turn this on by default using \code{options(datatable.verbose=TRUE)}. The quantity and types of verbosity may be expanded in future.
 
 }  
-  \item{allow.cartesian}{ \code{FALSE} prevents joins that would result in more than \code{max(nrow(x),nrow(i))} rows. This is usually caused by duplicate values in \code{i}'s join columns, each of which join to the same group in `x` over and over again: a \emph{misspecified} join. Usually this was not intended and the join needs to be changed. The word 'cartesian' is used loosely in this context. The traditional cartesian join is (deliberately) difficult to achieve in \code{data.table}: where every row in \code{i} joins to every row in \code{x} (a \code{nrow(x)*nrow(i)} row result). 'cartesian' is just meant in a 'large multiplicative' sense. }
+  \item{allow.cartesian}{ \code{FALSE} prevents joins that would result in more than \code{nrow(x)+nrow(i)} rows. This is usually caused by duplicate values in \code{i}'s join columns, each of which join to the same group in `x` over and over again: a \emph{misspecified} join. Usually this was not intended and the join needs to be changed. The word 'cartesian' is used loosely in this context. The traditional cartesian join is (deliberately) difficult to achieve in \code{data.table}: where every row in \code{i} joins to every row in \code{x} (a \code{nrow(x)*nrow(i)} row result). 'cartesian' is just meant in a 'large multiplicative' sense. }
   
   \item{drop}{ Never used by \code{data.table}. Do not use. It needs to be here because \code{data.table} inherits from \code{data.frame}. See \code{vignette("datatable-faq")}.
   
 }
-  \item{rolltolast}{ Deprecated. Setting \code{rolltolast=TRUE} is converted to \code{roll=TRUE;rollends=FALSE} for backwards compatibility.
-  
-}
+  \item{on}{ A named atomic vector of column names indicating which columns in \code{i} should be joined to which columns in \code{x}. See \code{Examples}.}
 }
 \details{
 \code{data.table} builds on base \R functionality to reduce 2 types of time :
@@ -282,6 +280,15 @@ DT[!2:4]                   # all rows other than 2:4
 DT[x!="b" | y!=3]          # not yet optimized, currently vector scans
 DT[!.("b",3)]              # same result but much faster
 
+
+# new feature: 'on' argument, from v1.9.6+
+DT1 = data.table(x=c("c", "a", "b", "a", "b"), a=1:5)
+DT2 = data.table(x=c("d", "c", "b"), mul=6:8)
+
+DT1[DT2, on=c(x="x")] # join on columns 'x'
+DT1[DT2, on="x"] # same as above
+DT1[DT2, .(sum(a) * mul), by=.EACHI, on="x"] # using by=.EACHI
+DT1[DT2, .(sum(a) * mul), by=.EACHI, on="x", nomatch=0L] # using by=.EACHI
 
 # Follow r-help posting guide, support is here (*not* r-help) :
 # http://stackoverflow.com/questions/tagged/data.table
