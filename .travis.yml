@@ -7,6 +7,7 @@
 # Hack for 'error on warning' except when the warning is about vignette pdfs/html
 # Thanks to csgillespie for https://github.com/csgillespie/travis-examples/tree/master/bioconductor
 language: c
+sudo: required
 
 before_install:
   - curl -OL http://raw.github.com/craigcitro/r-travis/master/scripts/travis-tool.sh
@@ -18,17 +19,20 @@ before_install:
 install:
   - ./travis-tool.sh bioc_install IRanges
   - ./travis-tool.sh bioc_install GenomicRanges
-  # - ./travis-tool.sh r_binary_install caret
   - ./travis-tool.sh install_deps
   
-script: ./travis-tool.sh run_tests
+script:
+  - echo "Commit:" $TRAVIS_COMMIT >> ./DESCRIPTION
+  - ./travis-tool.sh run_tests
 
 after_failure:
   - ./travis-tool.sh dump_logs
 
 after_success:
   - ./travis-tool.sh install_github jimhester/covr
-  - Rscript -e 'library(covr);codecov()'
+  - travis_wait Rscript -e 'library(covr);codecov()'
+  - ./travis-tool.sh install_github eddelbuettel/drat
+  - test $TRAVIS_REPO_SLUG == "Rdatatable/data.table" && test $TRAVIS_PULL_REQUEST == "false" && test $TRAVIS_BRANCH == "master" && bash deploy.sh
 
 notifications:
   email:
@@ -39,3 +43,5 @@ env:
   global:
     - PKG_CFLAGS="-g -O3 -Wall -pedantic"
     - WARNINGS_ARE_ERRORS=1
+    # drat using @jangorecki token
+    - secure: "CxDW++rsQApQWos+h1z/F76odysyD6AtXJrDwlCHlgqXeKJNRATR4wZDDR18SK+85jUqjoqOvpyrq+5kKuyg6AnA/zduaX2uYE5mcntEUiyzlG/jJUKbcJqt22nyAvFXP3VS60T2u4H6IIhVmr7dArdxLkv8W+pJvf2Tg6kx8Ws="

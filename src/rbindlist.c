@@ -1,20 +1,10 @@
 #include "data.table.h"
 #include <Rdefines.h>
-#include <Rversion.h>
 #include <stdint.h>
 // #include <signal.h> // the debugging machinery + breakpoint aidee
 // raise(SIGINT);
 
 /* Eddi's hash setup for combining factor levels appropriately - untouched from previous state (except made combineFactorLevels static) */
-
-// Fixes #5150
-// a simple check for R version to decide if the type should be R_len_t or R_xlen_t
-// long vector support was added in R 3.0.0
-#if defined(R_VERSION) && R_VERSION >= R_Version(3, 0, 0)
-  typedef R_xlen_t RLEN;
-#else
-  typedef R_len_t RLEN;
-#endif
 
 // a simple linked list, will use this when finding global order for ordered factors
 // will keep two ints
@@ -135,11 +125,12 @@ static void HashTableSetup(HashData *d, RLEN n)
     d->hash = shash;
     d->equal = sequal;
     MKsetup(d, n);
-    d->HashTable = malloc(sizeof(struct llist *) * (d->M));
-    if (d->HashTable == NULL) error("malloc failed in rbindlist.c. This part of the code will be reworked.");
+    //d->HashTable = malloc(sizeof(struct llist *) * (d->M));
+    //if (d->HashTable == NULL) error("malloc failed in rbindlist.c. This part of the code will be reworked.");
+    d->HashTable = (struct llist **)R_alloc(d->M, sizeof(struct llist *));
     for (RLEN i = 0; i < d->M; i++) d->HashTable[i] = NULL;
 }
-
+/*
 static void CleanHashTable(HashData *d)
 {
     struct llist * root, * tmp;
@@ -154,6 +145,7 @@ static void CleanHashTable(HashData *d)
     }
     free(d->HashTable);
 }
+*/
 
 // factorType is 1 for factor and 2 for ordered
 // will simply unique normal factors and attempt to find global order for ordered ones
@@ -204,8 +196,7 @@ SEXP combineFactorLevels(SEXP factorLevels, int * factorType, Rboolean * isRowOr
             }
             if (data.nmax-- < 0) error("hash table is full");
 
-            pl = malloc(sizeof(struct llist));
-            if (pl == NULL) error("malloc failed in rbindlist.c. This part of the code will be reworked.");
+            pl = (struct llist *)R_alloc(1, sizeof(struct llist));
             pl->next = NULL;
             pl->i = i;
             pl->j = j;
@@ -221,9 +212,10 @@ SEXP combineFactorLevels(SEXP factorLevels, int * factorType, Rboolean * isRowOr
     SEXP finalLevels = PROTECT(allocVector(STRSXP, uniqlen));
     R_len_t counter = 0;
     if (*factorType == 2) {
-        int * locs = malloc(sizeof(int) * len);
-        if (locs == NULL) error("malloc failed in rbindlist.c. This part of the code will be reworked.");
-        for (i = 0; i < len; ++i) locs[i] = 0;
+        int *locs = (int *)R_alloc(len, sizeof(int));
+        for (int i=0; i<len; i++) locs[i] = 0;
+        // note there's a goto (!!) normalFactor below. When locs was allocated with malloc, the goto jumped over the
+        // old free() and caused leak. Now uses the safer R_alloc.  TODO - review all this logic.
 
         R_len_t k;
         SEXP tmp;
@@ -299,7 +291,6 @@ SEXP combineFactorLevels(SEXP factorLevels, int * factorType, Rboolean * isRowOr
                 if (h[idx] == NULL) error("internal hash error, please report to datatable-help");
             }
         }
-        free (locs);
     }
 
  normalFactor:
@@ -325,7 +316,8 @@ SEXP combineFactorLevels(SEXP factorLevels, int * factorType, Rboolean * isRowOr
         }
     }
 
-    CleanHashTable(&data);
+    // CleanHashTable(&data);   No longer needed now we use R_alloc(). But the hash table approach
+    // will be removed completely at some point.
 
     return finalLevels;
 }
@@ -502,12 +494,14 @@ static void preprocess(SEXP l, Rboolean usenames, Rboolean fill, struct preproce
     
     data->first = -1; data->lcount = 0; data->n_rows = 0; data->n_cols = 0; data->protecti = 0;
     data->max_type = NULL; data->is_factor = NULL; data->ans_ptr = R_NilValue; data->mincol=0;
-    data->fn_rows = Calloc(LENGTH(l), int); data->colname = R_NilValue;
+    data->fn_rows = (int *)R_alloc(LENGTH(l), sizeof(int));
+    data->colname = R_NilValue;
 
     // get first non null name, 'rbind' was doing a 'match.names' for each item.. which is a bit more time consuming.
     // And warning that it'll be matched by names is not necessary, I think, as that's the default for 'rbind'. We 
     // should instead document it.
     for (i=0; i<LENGTH(l); i++) { // isNull is checked already in rbindlist
+        data->fn_rows[i] = 0;  // careful to initialize before continues as R_alloc above doesn't initialize
         li = VECTOR_ELT(l, i);
         if (isNull(li)) continue;
         if (TYPEOF(li) != VECSXP) error("Item %d of list input is not a data.frame, data.table or list",i+1);
@@ -565,10 +559,12 @@ static void preprocess(SEXP l, Rboolean usenames, Rboolean fill, struct preproce
     
     // decide type of each column
     // initialize the max types - will possibly increment later
-    data->max_type  = Calloc(data->n_cols, SEXPTYPE);
-    data->is_factor = Calloc(data->n_cols, int);
+    data->max_type  = (SEXPTYPE *)R_alloc(data->n_cols, sizeof(SEXPTYPE));
+    data->is_factor = (int *)R_alloc(data->n_cols, sizeof(int));
     for (i = 0; i< data->n_cols; i++) {
         thisClass = R_NilValue;
+        data->max_type[i] = 0;
+        data->is_factor[i] = 0;
         if (usenames) f_ind = VECTOR_ELT(findices, i);
         for (j=data->first; j<LENGTH(l); j++) {
             if (data->is_factor[i] == 2) break;
@@ -585,7 +581,7 @@ static void preprocess(SEXP l, Rboolean usenames, Rboolean fill, struct preproce
             } else {
                 // Fix for #705, check attributes and error if non-factor class and not identical
                 if (!data->is_factor[i] && 
-                    !R_compute_identical(thisClass, getAttrib(thiscol, R_ClassSymbol), 0)) {
+                    !R_compute_identical(thisClass, getAttrib(thiscol, R_ClassSymbol), 0) && !fill) {
                     error("Class attributes at column %d of input list at position %d does not match with column %d of input list at position %d. Coercion of objects of class 'factor' alone is handled internally by rbind/rbindlist at the moment.", i+1, j+1, i+1, data->first+1);
                 }
                 type = TYPEOF(thiscol);
@@ -595,16 +591,27 @@ static void preprocess(SEXP l, Rboolean usenames, Rboolean fill, struct preproce
     }
 }
 
-SEXP rbindlist(SEXP l, SEXP sexp_usenames, SEXP sexp_fill) {
+// function does c(idcol, nm), where length(idcol)=1
+// fix for #1432, + more efficient to move the logic to C
+SEXP add_idcol(SEXP nm, SEXP idcol, int cols) {
+    SEXP ans = PROTECT(allocVector(STRSXP, cols+1));
+    SET_STRING_ELT(ans, 0, STRING_ELT(idcol, 0));
+    for (int i=0; i<cols; i++) {
+        SET_STRING_ELT(ans, i+1, STRING_ELT(nm, i));
+    }
+    UNPROTECT(1);
+    return (ans);
+}
+
+SEXP rbindlist(SEXP l, SEXP sexp_usenames, SEXP sexp_fill, SEXP idcol) {
     
     R_len_t jj, ansloc, resi, i,j,r, idx, thislen;
     struct preprocessData data; 
-    Rboolean usenames, fill, to_copy = FALSE, coerced=FALSE;
+    Rboolean usenames, fill, to_copy = FALSE, coerced=FALSE, isidcol = !isNull(idcol);
     SEXP fnames = R_NilValue, findices = R_NilValue, f_ind = R_NilValue, ans, lf, li, target, thiscol, levels;
     SEXP factorLevels = R_NilValue, finalFactorLevels;
-    Rboolean *isRowOrdered = NULL;
-    R_len_t protecti;
-    
+    R_len_t protecti=0;
+
     // first level of error checks
     if (!isLogical(sexp_usenames) || LENGTH(sexp_usenames)!=1 || LOGICAL(sexp_usenames)[0]==NA_LOGICAL)
         error("use.names should be TRUE or FALSE");
@@ -620,26 +627,31 @@ SEXP rbindlist(SEXP l, SEXP sexp_usenames, SEXP sexp_fill) {
         warning("Resetting 'use.names' to TRUE. 'use.names' can not be FALSE when 'fill=TRUE'.\n");
         usenames=TRUE;
     }
+
     // check for factor, get max types, and when usenames=TRUE get the answer 'names' and column indices for proper reordering.
     preprocess(l, usenames, fill, &data);
     fnames   = VECTOR_ELT(data.ans_ptr, 0);
     findices = VECTOR_ELT(data.ans_ptr, 1);
-    protecti = data.protecti;
+    protecti = data.protecti;   // TODO very ugly and doesn't seem right. Assign items to list instead, perhaps.
     if (data.n_rows == 0 && data.n_cols == 0) {
         UNPROTECT(protecti);
         return(R_NilValue);
     }
-
+    if (isidcol) {
+        fnames = PROTECT(add_idcol(fnames, idcol, data.n_cols));
+        protecti++;
+    }
     factorLevels = PROTECT(allocVector(VECSXP, data.lcount));
-    isRowOrdered = Calloc(data.lcount, Rboolean);
+    Rboolean *isRowOrdered = (Rboolean *)R_alloc(data.lcount, sizeof(Rboolean));
+    for (int i=0; i<data.lcount; i++) isRowOrdered[i] = FALSE;
     
-    ans = PROTECT(allocVector(VECSXP, data.n_cols)); protecti++;
+    ans = PROTECT(allocVector(VECSXP, data.n_cols+isidcol)); protecti++;
     setAttrib(ans, R_NamesSymbol, fnames);
     lf = VECTOR_ELT(l, data.first);
     for(j=0; j<data.n_cols; j++) {
         if (fill) target = allocNAVector(data.max_type[j], data.n_rows);
         else target = allocVector(data.max_type[j], data.n_rows);
-        SET_VECTOR_ELT(ans, j, target);
+        SET_VECTOR_ELT(ans, j+isidcol, target);
         
         if (usenames) {
             to_copy = TRUE;
@@ -714,6 +726,11 @@ SEXP rbindlist(SEXP l, SEXP sexp_usenames, SEXP sexp_fill) {
                 for (r=0; r<thislen; r++)
                     SET_VECTOR_ELT(target, ansloc+r, VECTOR_ELT(thiscol,r));
                 break;
+	    case CPLXSXP : // #1659 fix
+		if (TYPEOF(thiscol) != TYPEOF(target)) error("Internal logical error in rbindlist.c, type of 'thiscol' should have already been coerced to 'target'. Please report to datatable-help.");
+		for (r=0; r<thislen; r++)
+		    COMPLEX(target)[ansloc+r] = COMPLEX(thiscol)[r];
+		break;
             case REALSXP:
             case INTSXP:
             case LGLSXP:
@@ -735,16 +752,34 @@ SEXP rbindlist(SEXP l, SEXP sexp_usenames, SEXP sexp_fill) {
             finalFactorLevels = combineFactorLevels(factorLevels, &(data.is_factor[j]), isRowOrdered);
             SEXP factorLangSxp = PROTECT(lang3(install(data.is_factor[j] == 1 ? "factor" : "ordered"),
                                                target, finalFactorLevels));
-            SET_VECTOR_ELT(ans, j, eval(factorLangSxp, R_GlobalEnv));
+            SET_VECTOR_ELT(ans, j+isidcol, eval(factorLangSxp, R_GlobalEnv));
             UNPROTECT(2);  // finalFactorLevels, factorLangSxp
         }
     }
     if (factorLevels != R_NilValue) UNPROTECT_PTR(factorLevels);
 
-    Free(data.max_type);
-    Free(data.is_factor);
-    Free(data.fn_rows);
-    Free(isRowOrdered);
+    // fix for #1432, + more efficient to move the logic to C
+    if (isidcol) {
+        R_len_t runidx = 1, cntridx = 0;
+        SEXP lnames = getAttrib(l, R_NamesSymbol);
+        if (isNull(lnames)) {
+            target = allocVector(INTSXP, data.n_rows);
+            SET_VECTOR_ELT(ans, 0, target);
+            for (i=0; i<LENGTH(l); i++) {
+                for (j=0; j<data.fn_rows[i]; j++)
+                    INTEGER(target)[cntridx++] = runidx;
+                runidx++;
+            }
+        } else {
+            target = allocVector(STRSXP, data.n_rows);
+            SET_VECTOR_ELT(ans, 0, target);
+            for (i=0; i<LENGTH(l); i++) {
+                for (j=0; j<data.fn_rows[i]; j++)
+                    SET_STRING_ELT(target, cntridx++, STRING_ELT(lnames, i));
+            }
+        }
+    }
+
     UNPROTECT(protecti);
     return(ans);
 }
