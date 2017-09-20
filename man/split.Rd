@@ -7,13 +7,13 @@
 }
 \usage{
 \method{split}{data.table}(x, f, drop = FALSE,
-      by, sorted = FALSE, keep.by = TRUE, flatten = TRUE, 
+      by, sorted = FALSE, keep.by = TRUE, flatten = TRUE,
       ..., verbose = getOption("datatable.verbose"))
 }
 \arguments{
   \item{x}{data.table }
   \item{f}{factor or list of factors. Same as \code{\link[base]{split.data.frame}}. Use \code{by} argument instead, this is just for consistency with data.frame method.}
-  \item{drop}{logical. Default \code{FALSE} will not drop empty list elements caused by factor levels not refered by that factors. Works also with new arguments of split data.table method.}
+  \item{drop}{logical. Default \code{FALSE} will not drop empty list elements caused by factor levels not referred by that factors. Works also with new arguments of split data.table method.}
   \item{by}{character vector. Column names on which split should be made. For \code{length(by) > 1L} and \code{flatten} FALSE it will result nested lists with data.tables on leafs.}
   \item{sorted}{When default \code{FALSE} it will retain the order of groups we are splitting on. When \code{TRUE} then sorted list(s) are returned. Does not have effect for \code{f} argument.}
   \item{keep.by}{logical default \code{TRUE}. Keep column provided to \code{by} argument.}
@@ -30,9 +30,9 @@
 \seealso{ \code{\link{data.table}}, \code{\link{rbindlist}} }
 \examples{
 set.seed(123)
-dt = data.table(x1 = rep(letters[1:2], 6), 
-                x2 = rep(letters[3:5], 4), 
-                x3 = rep(letters[5:8], 3), 
+dt = data.table(x1 = rep(letters[1:2], 6),
+                x2 = rep(letters[3:5], 4),
+                x3 = rep(letters[5:8], 3),
                 y = rnorm(12))
 dt = dt[sample(.N)]
 df = as.data.frame(dt)

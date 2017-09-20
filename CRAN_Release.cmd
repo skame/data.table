@@ -115,7 +115,7 @@ test.data.table()
 ###############################################
 
 vi ~/.R/Makevars  # make the -O0 -g line active, for info on source lines with any problems
-R --vanilla CMD INSTALL data.table_1.10.1.tar.gz
+R --vanilla CMD INSTALL data.table_1.10.5.tar.gz
 R -d "valgrind --tool=memcheck --leak-check=full --show-leak-kinds=definite" --vanilla
 require(data.table)
 require(bit64)
@@ -252,7 +252,7 @@ sudo apt-get -y build-dep r-cran-cairodevice
 sudo apt-get -y build-dep r-cran-tkrplot
 sudo apt-get -y install libcurl4-openssl-dev    # needed by devtools
 sudo apt-get -y install xorg-dev x11-common libgdal-dev libproj-dev mysql-client libcairo2-dev libglpk-dev
-sudo apt-get -y install texlive texlive-latex-extra texlive-bibtex-extra texlive-science texinfo fonts-inconsolata latex-xcolor
+sudo apt-get -y install texlive texlive-latex-extra texlive-bibtex-extra texlive-science texinfo texlive-fonts-extra latex-xcolor
 sudo apt-get -y install libv8-dev
 sudo apt-get -y install gsl-bin libgsl0-dev
 sudo apt-get -y install libgtk2.0-dev netcdf-bin
